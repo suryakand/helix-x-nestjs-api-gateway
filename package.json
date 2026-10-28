@@ -1,0 +1,110 @@
+{
+  "name": "@helix-x/nestjs-api-gateway",
+  "version": "0.1.0",
+  "description": "Multi-tenant access gateway for NestJS: Keycloak organizations as tenants, user and M2M client tokens, a table-driven route policy, per-principal quotas, usage metering, a Keycloak admin API and a streaming reverse proxy.",
+  "license": "ISC",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "jest",
+    "docs": "typedoc",
+    "clean": "rm -rf dist docs",
+    "prepack": "npm run clean && npm run build",
+    "pack:local": "npm run prepack && npm pack --pack-destination ./dist"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": ".",
+    "testRegex": "test/.*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
+    "testEnvironment": "node"
+  },
+  "dependencies": {
+    "ioredis": "^5.11.1",
+    "jose": "^5.10.0"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/swagger": "^11.0.0",
+    "@nestjs/typeorm": "^11.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.0",
+    "express": "^5.0.0",
+    "pg": "^8.11.0",
+    "reflect-metadata": "^0.2.0",
+    "rxjs": "^7.8.0",
+    "sqlite3": "^5.1.6",
+    "typeorm": "^0.3.20"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    },
+    "sqlite3": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@nestjs/common": "11.2.7",
+    "@nestjs/config": "4.0.4",
+    "@nestjs/core": "11.2.7",
+    "@nestjs/platform-express": "11.2.7",
+    "@nestjs/swagger": "11.4.7",
+    "@nestjs/testing": "11.2.7",
+    "@nestjs/typeorm": "11.0.3",
+    "@types/express": "5.0.3",
+    "@types/jest": "29.5.14",
+    "@types/node": "22.20.5",
+    "class-transformer": "0.5.1",
+    "class-validator": "0.14.4",
+    "express": "5.2.1",
+    "jest": "29.7.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "sqlite3": "5.1.7",
+    "ts-jest": "29.4.15",
+    "ts-node": "^10.9.2",
+    "typedoc": "^0.28.20",
+    "typeorm": "0.3.31",
+    "typescript": "5.7.3"
+  },
+  "keywords": [
+    "nestjs",
+    "api-gateway",
+    "keycloak",
+    "multi-tenant",
+    "rate-limiting",
+    "metering",
+    "reverse-proxy"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

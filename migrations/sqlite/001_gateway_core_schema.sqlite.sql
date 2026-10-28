@@ -1,0 +1,65 @@
+-- SQLite twin of ../001_initial_schema.sql: same tables, columns, keys and names. Types are the ones in
+-- src/database/column-types.ts: uuid → varchar(36), timestamptz → datetime (UTC text), jsonb → JSON text,
+-- inet → varchar(45), bigserial → integer autoincrement.
+
+CREATE TABLE IF NOT EXISTS "principal_limits" (
+  "id" varchar(36) NOT NULL,
+  "tenant_id" varchar(36) NOT NULL,
+  "principal_type" varchar(8) NOT NULL,
+  "principal_key" varchar(255) NOT NULL,
+  "rate_limit_type" varchar(16) NOT NULL DEFAULT ('UNLIMITED'),
+  "rate_limit_value" integer,
+  "fixed_used" integer NOT NULL DEFAULT (0),
+  "updated_at" datetime NOT NULL DEFAULT (datetime('now')),
+  CONSTRAINT "PK_f813181586c613e364b27b572a4" PRIMARY KEY ("id"),
+  CONSTRAINT "uq_principal_limits" UNIQUE ("tenant_id", "principal_type", "principal_key"),
+  CONSTRAINT "chk_principal_limits" CHECK ("rate_limit_type" = 'UNLIMITED' OR "rate_limit_value" > 0)
+);
+
+CREATE TABLE IF NOT EXISTS "usage_logs" (
+  "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+  "ts" datetime NOT NULL,
+  "tenant_id" varchar(36),
+  "auth_type" varchar(8),
+  "method" varchar(8) NOT NULL,
+  "endpoint" varchar(200) NOT NULL,
+  "path" varchar(500) NOT NULL,
+  "response_status" smallint NOT NULL,
+  "duration_ms" integer NOT NULL,
+  "client_ip" varchar(45),
+  "principal_type" varchar(8),
+  "principal_key" varchar(255),
+  "principal_label" varchar(255)
+);
+CREATE INDEX IF NOT EXISTS "idx_usage_logs_tenant_ts" ON "usage_logs" ("tenant_id", "ts");
+CREATE INDEX IF NOT EXISTS "idx_usage_logs_principal" ON "usage_logs" ("tenant_id", "principal_type", "principal_key", "ts");
+
+CREATE TABLE IF NOT EXISTS "usage_daily" (
+  "day" date NOT NULL,
+  "tenant_id" varchar(36) NOT NULL,
+  "endpoint" varchar(200) NOT NULL,
+  "request_count" integer NOT NULL DEFAULT (0),
+  "error_count" integer NOT NULL DEFAULT (0),
+  "principal_type" varchar(8) NOT NULL,
+  "principal_key" varchar(255) NOT NULL,
+  "principal_label" varchar(255),
+  CONSTRAINT "PK_ff6fa455c8d3a74e5c3018d705d" PRIMARY KEY ("day", "tenant_id", "endpoint", "principal_type", "principal_key")
+);
+CREATE INDEX IF NOT EXISTS "idx_usage_daily_tenant_day" ON "usage_daily" ("tenant_id", "day");
+
+CREATE TABLE IF NOT EXISTS "admin_audit" (
+  "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+  "ts" datetime NOT NULL DEFAULT (datetime('now')),
+  "actor_key" varchar(255) NOT NULL,
+  "actor_label" varchar(255) NOT NULL,
+  "tenant_id" varchar(36),
+  "action" varchar(64) NOT NULL,
+  "target" varchar(255),
+  "detail" text
+);
+CREATE INDEX IF NOT EXISTS "idx_admin_audit_tenant_ts" ON "admin_audit" ("tenant_id", "ts");
+
+-- Ledger: record this file. The runner replaces the placeholder checksum with the real sha256.
+INSERT INTO gateway_schema_migrations (version, checksum, applied_by)
+VALUES ('001_gateway_core_schema', 'self-recorded', 'sqlite')
+ON CONFLICT (version) DO NOTHING;

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "src/index.ts"
+  ],
+  "out": "docs",
+  "name": "@helix-x/nestjs-api-gateway",
+  "includeVersion": true,
+  "readme": "README.md",
+  "hideGenerator": true,
+  "categorizeByGroup": true,
+  "sort": [
+    "static-first",
+    "alphabetical"
+  ],
+  "searchInComments": true,
+  "highlightLanguages": [
+    "bash",
+    "javascript",
+    "js",
+    "json",
+    "sql",
+    "ts",
+    "typescript"
+  ],
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "treatWarningsAsErrors": false,
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": false
+  },
+  "externalSymbolLinkMappings": {
+    "@types/node": {
+      "*": "https://nodejs.org/api/"
+    },
+    "@types/express": {
+      "*": "https://expressjs.com/en/5x/api.html"
+    }
+  },
+  "excludeExternals": true
+}
