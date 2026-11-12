@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { OrgInfo } from '../access/access-decision';
+import { OrgInfo, parseEntitlements } from '../access/access-decision';
 import { InvalidationService } from '../redis/invalidation.service';
 import { gatewayOptions } from '../options';
 import { KcOrganization, KeycloakAdminService } from './keycloak-admin.service';
@@ -8,9 +8,15 @@ const CACHE_MS = 60_000;
 const CACHE_MAX = 5_000;
 
 /** The tenant behind an organization, or null when it has no tenant id attribute (not provisioned). */
-export function orgInfo(o: KcOrganization, tenantIdAttribute = gatewayOptions().naming.tenantIdAttribute): OrgInfo | null {
+export function orgInfo(
+  o: KcOrganization,
+  tenantIdAttribute = gatewayOptions().naming.tenantIdAttribute,
+  entitlementsAttribute = gatewayOptions().naming.entitlementsAttribute,
+): OrgInfo | null {
   const tenantId = o.attributes?.[tenantIdAttribute]?.[0];
-  return tenantId ? { orgId: o.id, tenantId, alias: o.alias, name: o.name, enabled: o.enabled } : null;
+  return tenantId
+    ? { orgId: o.id, tenantId, alias: o.alias, name: o.name, enabled: o.enabled, entitlements: parseEntitlements(o.attributes?.[entitlementsAttribute]) }
+    : null;
 }
 
 /**

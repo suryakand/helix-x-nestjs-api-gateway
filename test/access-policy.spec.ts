@@ -56,4 +56,46 @@ describe('access policy', () => {
       .toThrow(/not under an upstream prefix/);
     expect(() => defineAccessPolicy({ ...base, servicePermissions: ['tenant:users:read'], routes: [] })).toThrow(/declared twice/);
   });
+
+  it('groups service permissions by product and defaults the entitlements to every service permission', () => {
+    expect(POLICY.products).toEqual({});
+    expect(POLICY.defaultEntitlements).toEqual(POLICY.servicePermissions);
+    const p = defineAccessPolicy({
+      servicePermissions: ['a:read', 'b:read'], products: { a: ['a:read'], b: ['b:read'] }, defaultEntitlements: ['a:read'],
+      routes: [], upstreamPrefixes: ['/a'],
+    });
+    expect(p.products).toEqual({ a: ['a:read'], b: ['b:read'] });
+    expect(p.defaultEntitlements).toEqual(['a:read']);
+  });
+
+  it('refuses a product or default entitlement that is not a service permission, and a permission in two products', () => {
+    const base = { servicePermissions: ['a:read'], routes: [], upstreamPrefixes: ['/a'] };
+    expect(() => defineAccessPolicy({ ...base, products: { a: ['x:read' as 'a:read'] } })).toThrow(/not a service permission/);
+    expect(() => defineAccessPolicy({ ...base, products: { a: ['a:read'], b: ['a:read'] } })).toThrow(/in products a and b/);
+    expect(() => defineAccessPolicy({ ...base, defaultEntitlements: ['tenant:usage:read' as 'a:read'] })).toThrow(/default entitlement/);
+  });
+
+  it("meters tenant routes by their own mode, else the default ('request' unless set); platform routes never", () => {
+    expect(POLICY.defaultMetering).toBe('request');
+    expect(POLICY.meteringOf(POLICY.resolveRoute('GET', '/orders')!)).toBe('request');
+    expect(POLICY.meteringOf(POLICY.resolveRoute('GET', '/orders/1/quote')!)).toBe('upstream');
+    expect(POLICY.meteringOf(POLICY.resolveRoute('GET', '/catalog/categories')!)).toBe('none');
+    expect(POLICY.meteringOf(POLICY.resolveRoute('GET', '/queue/tasks')!)).toBe('none');
+    const free = defineAccessPolicy({
+      servicePermissions: ['a:read'], upstreamPrefixes: ['/a'], defaultMetering: 'none',
+      routes: [{ method: 'GET', pattern: '/a', permission: 'a:read' }, { method: 'GET', pattern: '/a/:id', permission: 'a:read', metering: 'upstream' }],
+    });
+    expect(free.meteringOf(free.resolveRoute('GET', '/a')!)).toBe('none');
+    expect(free.meteringOf(free.resolveRoute('GET', '/a/1')!)).toBe('upstream');
+  });
+
+  it('refuses an unknown metering mode, and metering on a platform route', () => {
+    const base = { servicePermissions: ['a:read'], upstreamPrefixes: ['/a'] };
+    expect(() => defineAccessPolicy({ ...base, routes: [{ method: 'GET', pattern: '/a', permission: 'a:read', metering: 'sometimes' as 'none' }] }))
+      .toThrow(/has metering sometimes/);
+    expect(() => defineAccessPolicy({
+      ...base, routes: [{ method: 'GET', pattern: '/a', permission: 'platform:usage:read', scope: 'platform', metering: 'request' as never }],
+    })).toThrow(/platform routes are never metered/);
+    expect(() => defineAccessPolicy({ ...base, routes: [], defaultMetering: 'free' as 'none' })).toThrow(/unknown default metering/);
+  });
 });

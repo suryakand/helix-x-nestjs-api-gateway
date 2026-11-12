@@ -35,6 +35,7 @@ export class RateLimitStateDto {
 export class UsageTotalsDto {
   @ApiProperty() requests: number;
   @ApiProperty() errors: number;
+  @ApiProperty({ description: 'Units charged to the limit (calls on unmetered routes and cached answers cost 0)' }) billed: number;
 }
 
 // ---- identity and tenants ---------------------------------------------------------------------------
@@ -51,6 +52,13 @@ export class TenantDto {
   member: boolean | null;
   @ApiPropertyOptional({ nullable: true, type: Number, description: 'Platform admin list only' }) userCount: number | null;
   @ApiPropertyOptional({ nullable: true, type: Number, description: 'Platform admin list only' }) clientCount: number | null;
+  @ApiPropertyOptional({
+    ...PERMISSION_LIST, nullable: true,
+    description: 'Service permissions the tenant may use: its own entitlements, or the defaults (see entitlementsSet)',
+  })
+  entitlements: string[] | null;
+  @ApiPropertyOptional({ nullable: true, type: Boolean, description: 'false = no entitlements of its own; the defaults apply' })
+  entitlementsSet: boolean | null;
 }
 
 export class OrganizationGroupDto {
@@ -100,6 +108,9 @@ export class CreateTenantDto {
 export class UpdateTenantDto {
   @ApiPropertyOptional() @IsOptional() @IsString() @Length(2, 200) name?: string;
   @ApiPropertyOptional({ enum: ['ACTIVE', 'SUSPENDED'] }) @IsOptional() @IsIn(['ACTIVE', 'SUSPENDED']) status?: 'ACTIVE' | 'SUSPENDED';
+  @ApiPropertyOptional({ ...PERMISSION_LIST, description: 'Service permissions the tenant may use (replaces the whole set; [] = none)' })
+  @IsOptional() @IsArray() @ArrayUnique() @IsIn(SERVICE_PERMISSION_VALUES, { each: true })
+  entitlements?: string[];
 }
 
 export class PermissionInfoDto {
@@ -114,11 +125,20 @@ export class TenantGroupInfoDto {
   @ApiProperty({ type: [String] }) permissions: string[];
 }
 
+export class ProductInfoDto {
+  @ApiProperty({ example: 'orders' }) name: string;
+  @ApiProperty(PERMISSION_LIST) permissions: string[];
+}
+
 export class PermissionCatalogDto {
   @ApiProperty({ type: [PermissionInfoDto], description: 'Client roles of the resource-server client, as defined in Keycloak' })
   permissions: PermissionInfoDto[];
   @ApiProperty({ type: [TenantGroupInfoDto], description: "Every tenant's groups and what their bundle grants" })
   groups: TenantGroupInfoDto[];
+  @ApiProperty({ type: [ProductInfoDto], description: "Service permissions grouped by product (the policy's products)" })
+  products: ProductInfoDto[];
+  @ApiProperty({ ...PERMISSION_LIST, description: 'Service permissions of a tenant without entitlements of its own' })
+  defaultEntitlements: string[];
 }
 
 // ---- tenant users ------------------------------------------------------------------------------------
@@ -134,6 +154,11 @@ export class TenantUserDto {
   @ApiPropertyOptional({ enum: TENANT_GROUP_NAMES, nullable: true, description: 'null = member without access in this tenant' })
   group: TenantGroup | null;
   @ApiProperty({ type: [String], description: "Permissions from the group's bundle" }) permissions: string[];
+  @ApiPropertyOptional({
+    ...PERMISSION_LIST, nullable: true,
+    description: 'Service permissions an admin allowed this user here; the bundle is the maximum. null = not narrowed',
+  })
+  allowedPermissions: string[] | null;
   @ApiProperty({ type: RateLimitStateDto }) rateLimit: RateLimitStateDto;
   @ApiPropertyOptional({ nullable: true, type: String, description: 'Last call through the gateway in this tenant' }) lastSeenAt: string | null;
   @ApiProperty({ type: UsageTotalsDto }) usage30d: UsageTotalsDto;
@@ -148,6 +173,12 @@ export class InviteUserDto {
   @IsOptional() @IsString() @Length(8, 128)
   temporaryPassword?: string;
   @ApiPropertyOptional({ type: RateLimitConfigDto }) @IsOptional() @ValidateNested() @Type(() => RateLimitConfigDto) rateLimit?: RateLimitConfigDto;
+  @ApiPropertyOptional({
+    ...PERMISSION_LIST, nullable: true,
+    description: 'Narrow the user to these service permissions (the group still sets the maximum); null = not narrowed',
+  })
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsArray() @ArrayUnique() @IsIn(SERVICE_PERMISSION_VALUES, { each: true })
+  allowedPermissions?: string[] | null;
 }
 
 export class InvitedUserDto {
@@ -161,6 +192,12 @@ export class UpdateTenantUserDto {
   @IsOptional() @IsIn(GROUP_OR_NONE)
   group?: TenantGroup | 'none';
   @ApiPropertyOptional({ type: RateLimitConfigDto }) @IsOptional() @ValidateNested() @Type(() => RateLimitConfigDto) rateLimit?: RateLimitConfigDto;
+  @ApiPropertyOptional({
+    ...PERMISSION_LIST, nullable: true,
+    description: 'Narrow the user to these service permissions (the group still sets the maximum); null = not narrowed',
+  })
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsArray() @ArrayUnique() @IsIn(SERVICE_PERMISSION_VALUES, { each: true })
+  allowedPermissions?: string[] | null;
   @ApiPropertyOptional({ description: 'Zero the consumed FIXED quota and the current window counter' }) @IsOptional() @IsBoolean() resetUsage?: boolean;
 }
 

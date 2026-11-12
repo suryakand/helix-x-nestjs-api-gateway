@@ -12,6 +12,10 @@ export const POLICY = defineAccessPolicy({
     { method: 'GET', pattern: '/orders/:id', permission: 'orders:read' },
     { method: 'GET', pattern: '/orders/:id/documents/:doc', permission: 'orders:read' },
     { method: 'GET', pattern: '/orders/summary', permission: 'orders:read' },
+    // A paid lookup the upstream may answer from cache: it reports the units it used.
+    { method: 'GET', pattern: '/orders/:id/quote', permission: 'orders:read', metering: 'upstream' },
+    // A free read.
+    { method: 'GET', pattern: '/catalog/categories', permission: 'catalog:read', metering: 'none' },
     { method: 'GET', pattern: '/queue/tasks', permission: 'platform:queue:work', scope: 'platform' },
     { method: 'POST', pattern: '/queue/tasks/:id/claim', permission: 'platform:queue:work', scope: 'platform' },
     { method: 'POST', pattern: '/queue/tasks/:id/complete', permission: 'platform:queue:work', scope: 'platform' },

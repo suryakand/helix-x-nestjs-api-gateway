@@ -7,7 +7,8 @@ import { KcUser, KeycloakAdminService } from '../keycloak/keycloak-admin.service
 import { PermissionCatalog } from '../keycloak/permission-catalog.service';
 import { LimitsService } from '../metering/limits.service';
 import { NO_USAGE, UsageStatsService } from '../metering/usage-stats.service';
-import { checkGroupChange, checkKeepsAdmin } from './admin-guard';
+import { gatewayOptions } from '../options';
+import { checkGroupChange, checkKeepsAdmin, checkUserPermissions } from './admin-guard';
 import { AuditService } from './audit.service';
 import { InviteUserDto, InvitedUserDto, TenantUserDto, UpdateTenantUserDto } from './dto';
 import { TenantGroupIds, TenantProvisioning } from './tenant-provisioning.service';
@@ -16,8 +17,9 @@ interface Roster { groups: TenantGroupIds; groupOf: Map<string, TenantGroup>; ad
 
 /**
  * A tenant's users: members of its Keycloak organization, with access through exactly one of its groups
- * (admins / members / viewers). Everything is changed in Keycloak; the gateway keeps only their limits. A
- * change that removes or narrows access is also revoked here, so tokens issued before it stop working at once.
+ * (admins / members / viewers). Everything is changed in Keycloak; the gateway keeps only their limits and an
+ * optional narrowing (the service permissions an admin allows them, within the group's bundle). A group change
+ * is also revoked here, so tokens issued before it stop working at once; a narrowing applies on the next call.
  */
 @Injectable()
 export class TenantUsersService {
@@ -32,15 +34,16 @@ export class TenantUsersService {
   ) {}
 
   async list(t: TenantGrant): Promise<TenantUserDto[]> {
-    const [members, roster, limits, usage, seen] = await Promise.all([
+    const [members, roster, limits, usage, seen, allowed] = await Promise.all([
       this.kc.organizationMembers(t.orgId),
       this.roster(t.orgId),
       this.limits.statesFor(t.tenantId, 'USER'),
       this.stats.totals(t.tenantId, 'USER'),
       this.stats.lastSeen(t.tenantId, 'USER'),
+      this.limits.allowedFor(t.tenantId),
     ]);
     const out = await Promise.all(members.map(async (m) => {
-      const dto = await this.toDto(m, roster.groupOf.get(m.id) ?? null);
+      const dto = await this.toDto(m, roster.groupOf.get(m.id) ?? null, allowed.get(m.id) ?? null);
       return { ...dto, rateLimit: limits.get(m.id) ?? dto.rateLimit, usage30d: usage.get(m.id) ?? NO_USAGE, lastSeenAt: seen.get(m.id) ?? null };
     }));
     return out.sort((a, b) => (a.displayName ?? a.username).localeCompare(b.displayName ?? b.username));
@@ -48,6 +51,7 @@ export class TenantUsersService {
 
   async invite(a: AccessContext, t: TenantGrant, body: InviteUserDto): Promise<InvitedUserDto> {
     await this.guardGroups(t, [body.group]);
+    if (body.allowedPermissions) this.guardNarrowing(t, body.allowedPermissions);
     let kcUser = await this.kc.findUserByEmail(body.email.trim());
     const created = !kcUser;
     let inviteEmailSent = false;
@@ -64,8 +68,11 @@ export class TenantUsersService {
     if (current && current !== body.group) await this.guardGroups(t, [current]);
     await this.setGroup(t, roster, kcUser.id, body.group);
     if (body.rateLimit) await this.limits.set(t.tenantId, 'USER', kcUser.id, { rateLimit: body.rateLimit });
-    await this.audit.record(a, created ? 'user.create' : 'user.add', t.tenantId, kcUser.email ?? kcUser.username, { group: body.group });
-    const dto = await this.toDto(kcUser, body.group);
+    if (body.allowedPermissions !== undefined) await this.limits.setAllowedPermissions(t.tenantId, kcUser.id, body.allowedPermissions);
+    await this.audit.record(a, created ? 'user.create' : 'user.add', t.tenantId, kcUser.email ?? kcUser.username, {
+      group: body.group, ...(body.allowedPermissions !== undefined ? { allowedPermissions: body.allowedPermissions } : {}),
+    });
+    const dto = await this.toDto(kcUser, body.group, (await this.limits.allowedFor(t.tenantId)).get(kcUser.id) ?? null);
     return { user: { ...dto, rateLimit: await this.limits.state(t.tenantId, 'USER', kcUser.id) }, created, inviteEmailSent };
   }
 
@@ -83,13 +90,19 @@ export class TenantUsersService {
         await this.audit.record(a, 'user.group', t.tenantId, kcUser.email ?? kcUser.username, { from: current, to: next });
       }
     }
+    if (body.allowedPermissions !== undefined) {
+      if (current) await this.guardGroups(t, [current]);
+      if (body.allowedPermissions) this.guardNarrowing(t, body.allowedPermissions);
+      await this.limits.setAllowedPermissions(t.tenantId, keycloakId, body.allowedPermissions);
+      await this.audit.record(a, 'user.permissions', t.tenantId, kcUser.email ?? kcUser.username, { allowedPermissions: body.allowedPermissions });
+    }
     let rateLimit = await this.limits.state(t.tenantId, 'USER', keycloakId);
     if (body.rateLimit || body.resetUsage) {
       rateLimit = await this.limits.set(t.tenantId, 'USER', keycloakId, { rateLimit: body.rateLimit, resetUsage: body.resetUsage });
       await this.audit.record(a, 'user.limit', t.tenantId, kcUser.email ?? kcUser.username, { rateLimit: body.rateLimit, resetUsage: body.resetUsage });
     }
     const group = body.group === undefined ? current : body.group === 'none' ? null : body.group;
-    return { ...(await this.toDto(kcUser, group)), rateLimit };
+    return { ...(await this.toDto(kcUser, group, (await this.limits.allowedFor(t.tenantId)).get(keycloakId) ?? null)), rateLimit };
   }
 
   async remove(a: AccessContext, t: TenantGrant, keycloakId: string): Promise<void> {
@@ -121,6 +134,12 @@ export class TenantUsersService {
     if (err) throw new ForbiddenException(err);
   }
 
+  /** A narrowing may list only service permissions the admin holds here (within the tenant's entitlements). */
+  private guardNarrowing(t: TenantGrant, permissions: string[]) {
+    const err = checkUserPermissions(t.permissions, permissions, (p) => gatewayOptions().policy.isServicePermission(p));
+    if (err) throw new ForbiddenException(err);
+  }
+
   /** The target must be a member of this tenant's organization. */
   private async member(t: TenantGrant, keycloakId: string): Promise<KcUser> {
     const kcUser = await this.kc.getUser(keycloakId);
@@ -143,7 +162,7 @@ export class TenantUsersService {
     return { groups, groupOf, admins };
   }
 
-  private async toDto(m: KcUser, group: TenantGroup | null): Promise<TenantUserDto> {
+  private async toDto(m: KcUser, group: TenantGroup | null, allowedPermissions: string[] | null): Promise<TenantUserDto> {
     return {
       keycloakId: m.id,
       username: m.username,
@@ -152,6 +171,7 @@ export class TenantUsersService {
       enabled: m.enabled,
       group,
       permissions: group ? await this.catalog.bundleOf(group) : [],
+      allowedPermissions,
       rateLimit: { type: 'UNLIMITED', value: null, currentUsage: null, resetsAt: null },
       lastSeenAt: null,
       usage30d: NO_USAGE,

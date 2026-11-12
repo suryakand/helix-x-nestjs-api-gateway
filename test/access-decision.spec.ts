@@ -1,11 +1,13 @@
-import { AccessInput, AccessPorts, decideAccess, OrgInfo } from '../src/access/access-decision';
+import {
+  AccessInput, AccessPorts, decideAccess, effectivePermissions, entitlementValues, OrgInfo, parseEntitlements,
+} from '../src/access/access-decision';
 import { Caller } from '../src/access/caller';
 import { KeycloakClaims } from '../src/access/jwt.verifier';
 import { ConsumeResult } from '../src/metering/rate-limiter.service';
 import { API, NAMING, POLICY } from './fixtures/acme';
 
-const ACME = { orgId: 'aaaaaaaa-1111-4111-8111-111111111111', tenantId: '11111111-1111-4111-8111-111111111111', alias: 'acme', name: 'Acme', enabled: true };
-const GLOBEX = { orgId: 'bbbbbbbb-2222-4222-8222-222222222222', tenantId: '22222222-2222-4222-8222-222222222222', alias: 'globex', name: 'Globex', enabled: true };
+const ACME: OrgInfo = { orgId: 'aaaaaaaa-1111-4111-8111-111111111111', tenantId: '11111111-1111-4111-8111-111111111111', alias: 'acme', name: 'Acme', enabled: true, entitlements: null };
+const GLOBEX: OrgInfo = { orgId: 'bbbbbbbb-2222-4222-8222-222222222222', tenantId: '22222222-2222-4222-8222-222222222222', alias: 'globex', name: 'Globex', enabled: true, entitlements: null };
 const MEMBER = ['tenant-member', 'orders:create', 'orders:read', 'catalog:read', 'tenant:usage:read'];
 const VIEWER = ['tenant-viewer', 'orders:read', 'catalog:read'];
 const PLATFORM = ['platform-admin', 'platform:tenants:access', 'platform:tenants:manage', 'platform:queue:work', ...MEMBER];
@@ -21,10 +23,11 @@ const TOKENS: Record<string, KeycloakClaims> = {
   m2m: { sub: 'sa-1', iat: 1000, azp: 'acme-m2m-acme-erp', acme_tenant: ACME.orgId, acme_tenant_id: ACME.tenantId, resource_access: { [API]: { roles: ['orders:read', 'platform:tenants:manage'] } } },
 };
 
-function ports(over: { orgs?: OrgInfo[]; revoked?: Record<string, number>; quota?: ConsumeResult } = {}) {
+function ports(over: { orgs?: OrgInfo[]; revoked?: Record<string, number>; quota?: ConsumeResult; peek?: ConsumeResult; allowed?: Record<string, string[]> } = {}) {
   const orgs = over.orgs ?? [ACME, GLOBEX];
   const p = {
     consumed: [] as string[],
+    peeked: [] as string[],
     apiClientId: API,
     policy: POLICY,
     naming: NAMING,
@@ -39,12 +42,17 @@ function ports(over: { orgs?: OrgInfo[]; revoked?: Record<string, number>; quota
     },
     orgById: async (id: string) => orgs.find((o) => o.orgId === id) ?? null,
     orgByTenantId: async (id: string) => orgs.find((o) => o.tenantId === id) ?? null,
+    allowedPermissions: async (tid: string, c: Caller) => over.allowed?.[`${tid}|${c.key}`] ?? null,
     consume: async (tid: string, c: Caller) => {
       p.consumed.push(`${tid}|${c.type}|${c.key}`);
       return over.quota ?? { allowed: true, limit: 10, remaining: 9 };
     },
+    peek: async (tid: string, c: Caller) => {
+      p.peeked.push(`${tid}|${c.type}|${c.key}`);
+      return over.peek ?? { allowed: true, limit: 10, remaining: 10 };
+    },
   };
-  return p as AccessPorts & { consumed: string[] };
+  return p as AccessPorts & { consumed: string[]; peeked: string[] };
 }
 
 const call = (token: string, over: Partial<AccessInput> = {}): AccessInput =>
@@ -158,6 +166,101 @@ describe('decideAccess', () => {
 
     it('a revoked account is refused', async () => {
       expect(await decideAccess(op('admin'), ports({ revoked: { 'user:u-admin': 1000 } }))).toMatchObject({ ok: false, status: 401 });
+    });
+  });
+
+  describe('entitlements and per-user narrowing', () => {
+    const order = { method: 'POST', path: '/orders' };
+    const ordersOnly = { ...ACME, entitlements: ['orders:read'] };
+
+    it('a tenant without entitlements of its own gets the defaults (every service permission here)', async () => {
+      expect(await decideAccess(call('alice', order), ports())).toMatchObject({ ok: true });
+    });
+
+    it('a service permission the tenant is not entitled to is refused, for users and clients alike', async () => {
+      expect(await decideAccess(call('alice', order), ports({ orgs: [ordersOnly, GLOBEX] }))).toMatchObject({ ok: false, status: 403 });
+      const r = await decideAccess(call('alice'), ports({ orgs: [ordersOnly, GLOBEX] }));
+      expect(r.ok && r.access.permissions).toEqual(['tenant-member', 'orders:read', 'tenant:usage:read']);
+      expect(await decideAccess(call('m2m', { path: '/catalog' }), ports({ orgs: [{ ...ACME, entitlements: ['catalog:read'] }, GLOBEX] })))
+        .toMatchObject({ ok: false, status: 403 });
+      expect(await decideAccess(call('m2m'), ports({ orgs: [ordersOnly, GLOBEX] }))).toMatchObject({ ok: true });
+    });
+
+    it('a user narrowed by an admin keeps only the allowed service permissions, in that tenant only', async () => {
+      const allowed = { [`${ACME.tenantId}|u-bob`]: ['orders:read'] };
+      expect(await decideAccess(call('bob', { ...order, tenantHeader: ACME.tenantId }), ports({ allowed }))).toMatchObject({ ok: false, status: 403 });
+      expect(await decideAccess(call('bob', { tenantHeader: ACME.tenantId }), ports({ allowed }))).toMatchObject({ ok: true });
+      expect(await decideAccess(call('bob', { path: '/catalog', tenantHeader: GLOBEX.tenantId }), ports({ allowed }))).toMatchObject({ ok: true });
+    });
+
+    it('narrowing never widens: an allowed permission outside the bundle is still missing', async () => {
+      const allowed = { [`${GLOBEX.tenantId}|u-bob`]: ['orders:create', 'orders:read'] };
+      expect(await decideAccess(call('bob', { ...order, tenantHeader: GLOBEX.tenantId }), ports({ allowed }))).toMatchObject({ ok: false, status: 403 });
+    });
+
+    it('a platform admin outside their tenants is limited by entitlements but not narrowed', async () => {
+      const allowed = { [`${GLOBEX.tenantId}|u-admin`]: [] };
+      expect(await decideAccess(call('admin', { ...order, tenantHeader: GLOBEX.tenantId }), ports({ allowed }))).toMatchObject({ ok: true });
+      expect(await decideAccess(call('admin', { ...order, tenantHeader: GLOBEX.tenantId }), ports({ orgs: [ACME, { ...GLOBEX, entitlements: [] }] })))
+        .toMatchObject({ ok: false, status: 403 });
+    });
+
+    it('effectivePermissions narrows service permissions only; attribute values round-trip, [] included', () => {
+      expect(effectivePermissions(['tenant:users:manage', 'orders:read', 'catalog:read', 'tenant-admin'], POLICY, ['orders:read'], null))
+        .toEqual(['tenant:users:manage', 'orders:read', 'tenant-admin']);
+      expect(effectivePermissions(['orders:read', 'catalog:read'], POLICY, null, ['catalog:read'])).toEqual(['catalog:read']);
+      expect(parseEntitlements(undefined)).toBeNull();
+      expect(parseEntitlements(entitlementValues([]))).toEqual([]);
+      expect(parseEntitlements(entitlementValues(['orders:read', 'orders:read']))).toEqual(['orders:read']);
+    });
+  });
+
+  describe('metering modes', () => {
+    it("'request' (the default) charges before proxying", async () => {
+      const p = ports();
+      const r = await decideAccess(call('alice'), p);
+      expect(r).toMatchObject({ ok: true, access: { metering: { mode: 'request' } }, quota: { allowed: true } });
+      expect(p.consumed).toHaveLength(1);
+      expect(p.peeked).toEqual([]);
+    });
+
+    it("'none' never charges and never refuses for quota", async () => {
+      const p = ports({ quota: { allowed: false, limit: 1, remaining: 0 } });
+      const r = await decideAccess(call('alice', { path: '/catalog/categories' }), p);
+      expect(r).toMatchObject({ ok: true, access: { metering: { mode: 'none' } } });
+      expect(r.ok && r.quota).toBeUndefined();
+      expect(p.consumed).toEqual([]);
+      expect(p.peeked).toEqual([]);
+    });
+
+    it("'upstream' looks at the limit without charging it", async () => {
+      const p = ports();
+      const r = await decideAccess(call('m2m', { path: '/orders/7/quote' }), p);
+      expect(r).toMatchObject({ ok: true, access: { metering: { mode: 'upstream', exhausted: false } } });
+      expect(p.consumed).toEqual([]);
+      expect(p.peeked).toEqual([`${ACME.tenantId}|CLIENT|acme-m2m-acme-erp`]);
+    });
+
+    it("'upstream' with a spent limit is passed on, not refused (the upstream may answer from cache)", async () => {
+      const p = ports({ peek: { allowed: false, limit: 5, remaining: 0 } });
+      const r = await decideAccess(call('alice', { path: '/orders/7/quote' }), p);
+      expect(r).toMatchObject({ ok: true, access: { metering: { mode: 'upstream', exhausted: true, state: { remaining: 0 } } } });
+      expect(p.consumed).toEqual([]);
+    });
+
+    it("'upstream' with the limiter down is 503 unless it fails open", async () => {
+      const down = await decideAccess(call('alice', { path: '/orders/7/quote' }), ports({ peek: { allowed: false, degraded: true } }));
+      expect(down).toMatchObject({ ok: false, status: 503 });
+      const open = await decideAccess(call('alice', { path: '/orders/7/quote' }), ports({ peek: { allowed: true, degraded: true } }));
+      expect(open).toMatchObject({ ok: true, access: { metering: { mode: 'upstream', exhausted: false } } });
+    });
+
+    it('a platform admin outside their tenants is never charged, whatever the route', async () => {
+      const p = ports();
+      const r = await decideAccess(call('admin', { path: '/orders/7/quote', tenantHeader: GLOBEX.tenantId }), p);
+      expect(r).toMatchObject({ ok: true, access: { member: false, metering: { mode: 'none' } } });
+      expect(p.consumed).toEqual([]);
+      expect(p.peeked).toEqual([]);
     });
   });
 });

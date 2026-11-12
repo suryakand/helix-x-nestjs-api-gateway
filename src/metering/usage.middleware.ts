@@ -6,6 +6,15 @@ import { gatewayOptions } from '../options';
 import { UsageRecorder } from './usage-recorder.service';
 
 /**
+ * Units a finished call was charged: 1 when the guard charged a `'request'` route (it only sets the metering on an
+ * allowed call), the upstream's count on an `'upstream'` route, 0 otherwise.
+ */
+function billedUnits(req: GatewayRequest): number {
+  const mode = req.access?.metering?.mode;
+  return mode === 'request' ? 1 : mode === 'upstream' ? (req.billedUnits ?? 0) : 0;
+}
+
+/**
  * Applied to the proxied upstream routes only. Hooks `finish` so rejections by the guard (401/403/429) are
  * recorded too. Records ids and the route template, never headers — so tokens and secrets cannot leak here.
  */
@@ -34,6 +43,7 @@ export class UsageMiddleware implements NestMiddleware {
         responseStatus: res.statusCode,
         durationMs: Date.now() - req.startedAt!,
         clientIp: req.ip ?? null,
+        billedUnits: billedUnits(req),
       });
     });
     next();

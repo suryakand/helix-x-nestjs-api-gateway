@@ -14,3 +14,9 @@ open http://localhost:3900/api             # gateway API + the upstream's /order
 ```
 
 Type-check with `npx tsc -p example --noEmit`.
+
+The policy declares two products, `catalog` and `orders`. A tenant without entitlements of its own gets only
+`catalog:read` (`defaultEntitlements`); a platform admin enables orders with
+`PATCH /tenants/:tid { "entitlements": ["catalog:read", "orders:read", "orders:create"] }`. A tenant admin can then
+narrow one user further: `PATCH /tenants/:tid/users/:id { "allowedPermissions": ["orders:read"] }`. The stand-in
+upstream echoes `x-acme-permissions`, the effective service permissions the gateway forwarded.

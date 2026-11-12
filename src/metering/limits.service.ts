@@ -13,7 +13,10 @@ export interface LimitConfig { type: RateLimitType; value?: number }
 export interface LimitState { type: RateLimitType; value: number | null; currentUsage: number | null; resetsAt: string | null }
 const UNLIMITED: LimitState = { type: 'UNLIMITED', value: null, currentUsage: null, resetsAt: null };
 
-/** Per-principal usage limits (the only access-related data the gateway stores). No row = unlimited. */
+/**
+ * Per-principal usage limits and per-user permission narrowing (the only access-related data the gateway
+ * stores). No row = unlimited and not narrowed.
+ */
 @Injectable()
 export class LimitsService {
   private readonly cache = new Map<string, { row: PrincipalLimit | null; at: number }>();
@@ -30,6 +33,40 @@ export class LimitsService {
   async consume(tenantId: string, caller: Caller): Promise<ConsumeResult> {
     const row = await this.get(tenantId, caller.type, caller.key);
     return row && row.rateLimitType !== 'UNLIMITED' ? this.limiter.consume(row) : { allowed: true };
+  }
+
+  /** The caller's limit here without charging it (see RateLimiterService.peek). */
+  async peek(tenantId: string, caller: Caller): Promise<ConsumeResult> {
+    const row = await this.get(tenantId, caller.type, caller.key);
+    return row && row.rateLimitType !== 'UNLIMITED' ? this.limiter.peek(row) : { allowed: true };
+  }
+
+  /** Charges `units` to the caller's limit after an `'upstream'` call (see RateLimiterService.charge). */
+  async charge(tenantId: string, caller: Caller, units: number): Promise<ConsumeResult> {
+    const row = await this.get(tenantId, caller.type, caller.key);
+    return row && row.rateLimitType !== 'UNLIMITED' ? this.limiter.charge(row, units) : { allowed: true };
+  }
+
+  /** The service permissions an admin allowed this user here (cached like the limit); null = not narrowed. */
+  async allowedPermissions(tenantId: string, caller: Caller): Promise<string[] | null> {
+    if (caller.type !== 'USER') return null;
+    return (await this.get(tenantId, caller.type, caller.key))?.allowedPermissions ?? null;
+  }
+
+  /** Per-user narrowing of a tenant's users, keyed by Keycloak user id (only users that have it). */
+  async allowedFor(tenantId: string): Promise<Map<string, string[]>> {
+    const rows = await this.repo.findBy({ tenantId, principalType: 'USER' });
+    return new Map(rows.filter((r) => r.allowedPermissions).map((r) => [r.principalKey, r.allowedPermissions!]));
+  }
+
+  /** Sets (a list) or clears (null) a user's narrowing; takes effect on their next call on every instance. */
+  async setAllowedPermissions(tenantId: string, userId: string, permissions: string[] | null): Promise<void> {
+    let row = await this.repo.findOneBy({ tenantId, principalType: 'USER', principalKey: userId });
+    if (!row && permissions === null) return;
+    row ??= this.repo.create({ tenantId, principalType: 'USER', principalKey: userId });
+    row.allowedPermissions = permissions === null ? null : [...new Set(permissions)].sort();
+    await this.repo.save(row);
+    await this.invalidation.publish('limit', this.cacheKey(tenantId, 'USER', userId));
   }
 
   async state(tenantId: string, type: PrincipalType, key: string): Promise<LimitState> {

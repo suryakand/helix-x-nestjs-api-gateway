@@ -19,22 +19,24 @@ export { AppConfig, GatewayDefaults, readGatewayConfig } from './config/configur
 
 // Policy
 export {
-  AccessPolicy, AccessPolicyInput, CorePlatformPermission, defineAccessPolicy, GatewayPermission, PLATFORM_PERMISSIONS, RouteRule,
+  AccessPolicy, AccessPolicyInput, CorePlatformPermission, defineAccessPolicy, GatewayPermission, METERING_MODES, MeteringMode,
+  PLATFORM_PERMISSIONS, RouteRule,
   TENANT_ADMIN_PERMISSIONS, TENANT_GROUP_NAMES, TENANT_GROUPS, TenantAdminPermission, TenantGroup,
 } from './access/access-policy';
 
 // Access decision (pure) and request context
 export {
-  AccessInput, AccessOutcome, AccessPorts, decideAccess, DenyStatus, OrgInfo, resolveTenant, revocationKeys, RouteMode, TenantResolution,
+  AccessInput, AccessOutcome, AccessPorts, decideAccess, DenyStatus, effectivePermissions, entitlementValues, NO_ENTITLEMENTS, OrgInfo,
+  parseEntitlements, resolveTenant, restrictGrant, revocationKeys, RouteMode, TenantResolution,
 } from './access/access-decision';
 export { Caller, CallerContext, parseCaller, PrincipalType, TenantGrant } from './access/caller';
 export { KeycloakClaims, JwtVerifier } from './access/jwt.verifier';
 export { AccessContext, GatewayRequest } from './access/request-context';
 export { Access, Authenticated, JwtOnly, ProxyRoute, Public } from './access/decorators';
-export { checkClientPermissions, checkGroupChange, checkKeepsAdmin } from './tenancy/admin-guard';
+export { checkClientPermissions, checkGroupChange, checkKeepsAdmin, checkUserPermissions } from './tenancy/admin-guard';
 export {
-  ClientCredentialsDto, CreateClientDto, InvitedUserDto, InviteUserDto, RateLimitConfigDto, RateLimitStateDto, TenantClientDto, TenantUserDto,
-  slugPart, UpdateClientDto, UpdateTenantUserDto, UsageTotalsDto,
+  ClientCredentialsDto, CreateClientDto, InvitedUserDto, InviteUserDto, PermissionCatalogDto, PermissionInfoDto, ProductInfoDto, RateLimitConfigDto,
+  RateLimitStateDto, TenantClientDto, TenantDto, TenantGroupInfoDto, TenantUserDto, slugPart, UpdateClientDto, UpdateTenantDto, UpdateTenantUserDto, UsageTotalsDto,
 } from './tenancy/dto';
 
 // Services a product's controllers and scripts may inject
@@ -45,6 +47,7 @@ export { OrgDirectory, orgInfo } from './keycloak/org-directory.service';
 export { Catalog, PermissionCatalog, PermissionInfo } from './keycloak/permission-catalog.service';
 export { LimitConfig, LimitsService, LimitState } from './metering/limits.service';
 export { ConsumeResult, Metered, RateLimiterService, UsageSnapshot } from './metering/rate-limiter.service';
+export { quotaHeaders } from './metering/quota-headers';
 export { UsageRecord, UsageRecorder } from './metering/usage-recorder.service';
 export { UsageStatsService, UsageTotals } from './metering/usage-stats.service';
 export { AuditService } from './tenancy/audit.service';

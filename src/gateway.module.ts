@@ -50,7 +50,7 @@ export class GatewayModule implements NestModule {
   /** Records the options (see `configureGateway`) and builds the module. One gateway per process. */
   static forRoot(options: GatewayModuleOptions): DynamicModule {
     const o = configureGateway(options);
-    const proxy = createProxyController(o.policy.upstreamPrefixes, o.naming, o.forwardPrincipalHeader);
+    const proxy = createProxyController(o.policy.upstreamPrefixes, o.naming, { principal: o.forwardPrincipalHeader, permissions: o.forwardPermissionsHeader });
     GatewayModule.proxy = proxy;
     return {
       module: GatewayModule,

@@ -8,6 +8,8 @@ import { policy } from './access-policy';
       policy,
       naming: { serviceName: 'acme-orders', claimPrefix: 'acme' },
       forwardPrincipalHeader: true,
+      // x-acme-permissions: the caller's effective service permissions, for finer checks upstream.
+      forwardPermissionsHeader: true,
       defaults: {
         port: 3900,
         upstreamUrl: 'http://localhost:3901',

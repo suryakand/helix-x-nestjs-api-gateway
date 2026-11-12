@@ -1,6 +1,7 @@
 import { Body, Controller, DefaultValuePipe, Get, NotFoundException, Param, ParseIntPipe, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiCreatedResponse, ApiOkResponse, ApiTags } from '@nestjs/swagger';
+import { effectivePermissions, entitlementValues, OrgInfo } from '../access/access-decision';
 import { TENANT_ADMIN_PERMISSIONS, TENANT_GROUP_NAMES, TENANT_GROUPS } from '../access/access-policy';
 import { Access, JwtOnly } from '../access/decorators';
 import { AccessContext } from '../access/request-context';
@@ -25,6 +26,12 @@ const kindOf = (p: string): 'service' | 'tenant' | 'platform' | 'other' => {
       : (policy.platformPermissions as readonly string[]).includes(p) ? 'platform' : 'other';
 };
 
+/** A tenant's entitlements for a TenantDto: its own, or the policy's defaults. Unknown org → null. */
+const entitlementFields = (org: OrgInfo | null): Pick<TenantDto, 'entitlements' | 'entitlementsSet'> =>
+  org
+    ? { entitlements: org.entitlements ?? [...gatewayOptions().policy.defaultEntitlements], entitlementsSet: org.entitlements !== null }
+    : { entitlements: null, entitlementsSet: null };
+
 /** Who am I, which tenants exist, and the permission model. Tenants are Keycloak organizations. */
 @ApiTags('identity')
 @ApiBearerAuth('keycloak')
@@ -48,14 +55,14 @@ export class TenantsController {
   }
 
   @Get('me')
-  @ApiOkResponse({ type: MeDto, description: 'Read from the token; tenant names from Keycloak (cached)' })
+  @ApiOkResponse({ type: MeDto, description: 'Read from the token, narrowed by entitlements and per-user choices; tenant names from Keycloak (cached)' })
   async me(@Access() a: AccessContext): Promise<MeDto> {
     const c = a.caller;
     const tenants = await Promise.all(c.tenants.map(async (t): Promise<TenantDto> => {
-      const org = await this.orgs.byId(t.orgId).catch(() => null);
+      const [org, grant] = await Promise.all([this.orgs.byId(t.orgId).catch(() => null), this.authz.restrict(a, t)]);
       return {
         id: t.tenantId, orgId: t.orgId, slug: t.alias, name: org?.name ?? t.alias, status: org?.enabled === false ? 'SUSPENDED' : 'ACTIVE',
-        permissions: t.permissions, member: true, userCount: null, clientCount: null,
+        permissions: grant.permissions, member: true, userCount: null, clientCount: null, ...entitlementFields(org),
       };
     }));
     return {
@@ -69,9 +76,12 @@ export class TenantsController {
   @ApiOkResponse({ type: PermissionCatalogDto })
   async permissions(): Promise<PermissionCatalogDto> {
     const cat = await this.catalog.get();
+    const { policy } = gatewayOptions();
     return {
       permissions: cat.permissions.map((p) => ({ ...p, kind: kindOf(p.name) })),
       groups: TENANT_GROUP_NAMES.map((name) => ({ name, bundle: TENANT_GROUPS[name], permissions: cat.bundles[TENANT_GROUPS[name]] ?? [] })),
+      products: Object.entries(policy.products).map(([name, permissions]) => ({ name, permissions: [...permissions] })),
+      defaultEntitlements: [...policy.defaultEntitlements],
     };
   }
 
@@ -86,7 +96,8 @@ export class TenantsController {
       if (!info) return null; // not set up yet: listed by GET /organizations/unprovisioned
       return {
         id: info.tenantId, orgId: o.id, slug: o.alias, name: o.name, status: o.enabled ? 'ACTIVE' : 'SUSPENDED',
-        permissions: own.get(o.id)?.permissions ?? a.caller.global, member: own.has(o.id),
+        permissions: effectivePermissions(own.get(o.id)?.permissions ?? a.caller.global, gatewayOptions().policy, info.entitlements, null),
+        member: own.has(o.id), ...entitlementFields(info),
         userCount: await this.kc.organizationMemberCount(o.id).catch(() => null),
         clientCount: clients.filter((c) => c.attributes?.[this.kc.naming.clientTenantAttribute] === o.id).length,
       };
@@ -105,7 +116,10 @@ export class TenantsController {
       const grant = await this.authz.require(a, info.tenantId, 'tenant:users:manage');
       await this.users.invite(a, grant, { email: body.adminEmail, group: 'admins' });
     }
-    return { id: info.tenantId, orgId: org.id, slug: org.alias, name: org.name, status: 'ACTIVE', permissions: a.caller.global, member: false, userCount: null, clientCount: 0 };
+    return {
+      id: info.tenantId, orgId: org.id, slug: org.alias, name: org.name, status: 'ACTIVE', permissions: a.caller.global, member: false,
+      userCount: null, clientCount: 0, ...entitlementFields(info),
+    };
   }
 
   @Get('tenants/:tid/groups')
@@ -149,12 +163,12 @@ export class TenantsController {
     await this.audit.record(a, 'tenant.provision', tenantId, org.alias);
     return {
       id: tenantId, orgId, slug: org.alias, name: org.name, status: org.enabled ? 'ACTIVE' : 'SUSPENDED',
-      permissions: a.caller.global, member: false, userCount: null, clientCount: null,
+      permissions: a.caller.global, member: false, userCount: null, clientCount: null, ...entitlementFields(await this.orgs.byId(orgId)),
     };
   }
 
   @Patch('tenants/:tid')
-  @ApiOkResponse({ type: TenantDto })
+  @ApiOkResponse({ type: TenantDto, description: 'Rename, suspend / activate, or set the entitlements (platform:tenants:manage). Entitlements apply on the next call' })
   async update(@Access() a: AccessContext, @Param('tid', ParseUUIDPipe) tid: string, @Body() body: UpdateTenantDto): Promise<TenantDto> {
     this.authz.requireGlobal(a, 'platform:tenants:manage');
     const org = await this.orgs.byTenantId(tid);
@@ -162,11 +176,21 @@ export class TenantsController {
     const next = await this.kc.updateOrganization(org.orgId, {
       ...(body.name !== undefined ? { name: body.name } : {}),
       ...(body.status !== undefined ? { enabled: body.status === 'ACTIVE' } : {}),
+      ...(body.entitlements !== undefined ? { attributes: { [this.kc.naming.entitlementsAttribute]: entitlementValues(body.entitlements) } } : {}),
     });
     if (body.status === 'SUSPENDED') await this.revocations.revoke(`tenant:${tid}`);
     await this.orgs.invalidate(org.orgId);
-    await this.audit.record(a, body.status ? `tenant.${body.status === 'ACTIVE' ? 'activate' : 'suspend'}` : 'tenant.rename', tid, org.alias, { ...body });
-    return { id: tid, orgId: org.orgId, slug: org.alias, name: next.name, status: next.enabled ? 'ACTIVE' : 'SUSPENDED', permissions: null, member: null, userCount: null, clientCount: null };
+    const { entitlements, ...rest } = body;
+    if (body.name !== undefined || body.status !== undefined) {
+      await this.audit.record(a, body.status ? `tenant.${body.status === 'ACTIVE' ? 'activate' : 'suspend'}` : 'tenant.rename', tid, org.alias, { ...rest });
+    }
+    if (entitlements !== undefined) {
+      await this.audit.record(a, 'tenant.entitlements', tid, org.alias, { from: org.entitlements, to: entitlements });
+    }
+    return {
+      id: tid, orgId: org.orgId, slug: org.alias, name: next.name, status: next.enabled ? 'ACTIVE' : 'SUSPENDED', permissions: null, member: null,
+      userCount: null, clientCount: null, ...entitlementFields(orgInfo(next)),
+    };
   }
 
   @Get('tenants/:tid/audit')

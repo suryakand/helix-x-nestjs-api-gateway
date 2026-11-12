@@ -21,12 +21,19 @@ export const COL = {
   inet: (pg ? { type: 'inet' } : { type: 'varchar', length: 45 }) satisfies ColumnOptions,
   /** text[] on Postgres, a JSON array in text on SQLite. */
   textArray: (pg ? { type: 'text', array: true, default: () => "'{}'" } : { type: 'simple-json', default: () => "'[]'" }) satisfies ColumnOptions,
+  /** Like textArray, but NULL allowed and the default: "not set" differs from an empty list. */
+  nullableTextArray: (pg ? { type: 'text', array: true, nullable: true } : { type: 'simple-json', nullable: true }) satisfies ColumnOptions,
 } as const;
 
 /** A timestamp from a raw query row as a Date: pg returns a Date, SQLite the UTC text TypeORM wrote. */
 export function sqlTimestamp(v: Date | string): Date {
   if (v instanceof Date) return v;
   return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(v) ? v : `${v.replace(' ', 'T')}Z`);
+}
+
+/** A Date as a query parameter compared with a timestamp column: pg takes the Date, SQLite the UTC text TypeORM writes. */
+export function sqlTimestampParam(d: Date): Date | string {
+  return pg ? d : d.toISOString().replace('T', ' ').replace('Z', '');
 }
 
 /** SQL for a date column as 'YYYY-MM-DD' text (pg would otherwise return a local-midnight Date). */

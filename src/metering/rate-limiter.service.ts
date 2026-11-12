@@ -86,6 +86,60 @@ export class RateLimiterService {
     });
   }
 
+  /**
+   * The limit as it stands, without charging it: `allowed` false when nothing is left. For `'upstream'` routes,
+   * charged afterwards with {@link charge}. Reads the counter fresh (FIXED from the database, not a cached row).
+   */
+  async peek(key: Metered, now = new Date()): Promise<ConsumeResult> {
+    const type = key.rateLimitType;
+    if (type === 'UNLIMITED') return { allowed: true };
+    const limit = key.rateLimitValue ?? 0;
+    if (type === 'FIXED') {
+      const row = await this.db.manager.findOneBy(PrincipalLimit, { id: key.id });
+      const used = row?.fixedUsed ?? key.fixedUsed;
+      return { allowed: used < limit, limit, remaining: Math.max(0, limit - used) };
+    }
+    if (!isWindowType(type)) return { allowed: false };
+    const w = windowFor(type, now);
+    try {
+      const v = await this.redis.get(redisKeyFor(key.id, type, w));
+      const used = v === null ? 0 : Number(v);
+      return { allowed: used < limit, limit, remaining: Math.max(0, limit - used), resetsAt: w.end };
+    } catch (e) {
+      this.log.warn(`rate limiter unavailable (${(e as Error).message}); failOpen=${this.failOpen}`);
+      return { allowed: this.failOpen, limit, resetsAt: w.end, degraded: true };
+    }
+  }
+
+  /**
+   * Charges `units` for a call that has already happened (`'upstream'` routes). Never refuses and has no cap: the
+   * cost was incurred, so concurrent calls that both passed {@link peek} can take usage a little over the limit.
+   * A failure to record is logged, not thrown (the caller's response is already on its way).
+   */
+  async charge(key: Metered, units: number, now = new Date()): Promise<ConsumeResult> {
+    const type = key.rateLimitType;
+    if (type === 'UNLIMITED' || units <= 0) return this.peek(key, now);
+    const limit = key.rateLimitValue ?? 0;
+    try {
+      if (type === 'FIXED') {
+        await this.db
+          .createQueryBuilder()
+          .update(PrincipalLimit)
+          .set({ fixedUsed: () => `fixed_used + ${Math.floor(units)}` })
+          .where('id = :id', { id: key.id })
+          .execute();
+        return this.peek(key, now);
+      }
+      if (!isWindowType(type)) return { allowed: false };
+      const w = windowFor(type, now);
+      const used = await this.redis.windowCharge(redisKeyFor(key.id, type, w), Math.floor(units), Math.floor(w.end.getTime() / 1000) + 3600);
+      return { allowed: used < limit, limit, remaining: Math.max(0, limit - used), resetsAt: w.end };
+    } catch (e) {
+      this.log.warn(`could not charge ${units} unit(s) to limit ${key.id}: ${(e as Error).message}`);
+      return { allowed: true, limit, degraded: true };
+    }
+  }
+
   /** Live usage for the admin API (Redis for windows, the DB column for FIXED). */
   async snapshot(key: Metered, now = new Date()): Promise<UsageSnapshot> {
     const type = key.rateLimitType;

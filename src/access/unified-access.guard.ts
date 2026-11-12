@@ -7,7 +7,7 @@ import { AppConfig } from '../config/configuration';
 import { IpLimiterService } from '../global-limit/ip-limiter.service';
 import { OrgDirectory } from '../keycloak/org-directory.service';
 import { LimitsService } from '../metering/limits.service';
-import { ConsumeResult } from '../metering/rate-limiter.service';
+import { quotaHeaders } from '../metering/quota-headers';
 import { AccessPorts, decideAccess, RouteMode } from './access-decision';
 import { ACCESS_MODE, IS_PUBLIC } from './decorators';
 import { JwtVerifier } from './jwt.verifier';
@@ -15,9 +15,11 @@ import { GatewayRequest } from './request-context';
 import { RevocationService } from './revocation.service';
 
 /**
- * Global guard: one entry point for user and M2M client tokens. Permissions come from the token (Keycloak);
- * the guard adds revocations made through the gateway and usage limits. The upstream never sees credentials —
- * it only receives the request after this guard has attached `req.access` and charged the quota.
+ * Global guard: one entry point for user and M2M client tokens. Permissions come from the token (Keycloak),
+ * narrowed by tenant entitlements and per-user choices; the guard adds revocations made through the gateway and
+ * usage limits. The upstream never sees credentials —
+ * it only receives the request after this guard has attached `req.access` and charged the quota (`'request'` routes;
+ * `'upstream'` routes are charged by the proxy, from the upstream's answer).
  */
 @Injectable()
 export class UnifiedAccessGuard implements CanActivate {
@@ -41,7 +43,9 @@ export class UnifiedAccessGuard implements CanActivate {
       revokedBefore: (keys) => revocations.revokedBefore(keys),
       orgById: (id) => orgs.byId(id),
       orgByTenantId: (id) => orgs.byTenantId(id),
+      allowedPermissions: (tid, caller) => limits.allowedPermissions(tid, caller),
       consume: (tid, caller) => limits.consume(tid, caller),
+      peek: (tid, caller) => limits.peek(tid, caller),
     };
   }
 
@@ -70,7 +74,7 @@ export class UnifiedAccessGuard implements CanActivate {
       },
       this.ports,
     );
-    if (outcome.quota) this.setQuotaHeaders(res, outcome.quota);
+    if (outcome.quota) res.set(quotaHeaders(outcome.quota));
     if (!outcome.ok) {
       req.access = outcome.identified;
       if (outcome.authFailure) void this.ipLimiter.recordAuthFailure(ip);
@@ -79,15 +83,5 @@ export class UnifiedAccessGuard implements CanActivate {
     }
     req.access = outcome.access;
     return true;
-  }
-
-  private setQuotaHeaders(res: Response, q: ConsumeResult) {
-    if (q.limit === undefined) return;
-    res.setHeader('X-RateLimit-Limit', String(q.limit));
-    if (q.remaining !== undefined) res.setHeader('X-RateLimit-Remaining', String(q.remaining));
-    if (q.resetsAt) {
-      res.setHeader('X-RateLimit-Reset', String(Math.floor(q.resetsAt.getTime() / 1000)));
-      if (!q.allowed) res.setHeader('Retry-After', String(Math.max(1, Math.ceil((q.resetsAt.getTime() - Date.now()) / 1000))));
-    }
   }
 }

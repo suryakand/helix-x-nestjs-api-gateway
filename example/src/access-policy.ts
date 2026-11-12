@@ -16,4 +16,8 @@ export const policy = defineAccessPolicy({
     { method: 'GET', pattern: '/queue/tasks', permission: 'platform:queue:work', scope: 'platform' },
   ],
   upstreamPrefixes: ['/catalog', '/orders', '/queue'],
+  // Two products a platform admin can switch on per tenant (PATCH /tenants/:tid { entitlements }). Catalog is on
+  // for every tenant without entitlements of its own; orders must be enabled explicitly.
+  products: { catalog: ['catalog:read'], orders: ['orders:create', 'orders:read'] },
+  defaultEntitlements: ['catalog:read'],
 });

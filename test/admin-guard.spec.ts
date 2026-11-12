@@ -1,4 +1,4 @@
-import { checkClientPermissions, checkGroupChange, checkKeepsAdmin } from '../src/tenancy/admin-guard';
+import { checkClientPermissions, checkGroupChange, checkKeepsAdmin, checkUserPermissions } from '../src/tenancy/admin-guard';
 import { POLICY } from './fixtures/acme';
 
 const isService = (p: string) => POLICY.isServicePermission(p);
@@ -24,5 +24,12 @@ describe('admin guard', () => {
     expect(checkKeepsAdmin(['a', 'b'], 'a', false)).toBeNull();
     expect(checkKeepsAdmin(['a'], 'b', false)).toBeNull();
     expect(checkKeepsAdmin(['a'], 'a', true)).toBeNull();
+  });
+
+  it('a user can be narrowed to service permissions the admin holds, nothing else', () => {
+    expect(checkUserPermissions(ADMIN, ['orders:read'], isService)).toBeNull();
+    expect(checkUserPermissions(ADMIN, [], isService)).toBeNull();
+    expect(checkUserPermissions(ADMIN, ['tenant:users:manage'], isService)).toMatch(/only be narrowed to service/);
+    expect(checkUserPermissions(['orders:read'], ['orders:create'], isService)).toMatch(/don't hold/);
   });
 });

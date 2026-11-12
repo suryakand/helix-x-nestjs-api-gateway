@@ -26,6 +26,8 @@ export interface GatewayNaming {
   tenantIdClaim: string;
   /** Organization attribute holding the tenant id; user tokens carry it per organization. Same as tenantIdClaim. */
   tenantIdAttribute: string;
+  /** Organization attribute listing the service permissions the tenant may use, e.g. `acme_entitlements`. */
+  entitlementsAttribute: string;
   /** Client attribute naming the organization an M2M client belongs to, e.g. `acme.tenant`. */
   clientTenantAttribute: string;
   /** Name of the protocol mapper that adds tenantClaim to an M2M client's tokens, e.g. `acme-tenant`. */
@@ -36,6 +38,15 @@ export interface GatewayNaming {
   tenantHeader: string;
   /** Header carrying `TYPE:key` of the caller upstream (only with forwardPrincipalHeader), e.g. `x-acme-principal`. */
   principalHeader: string;
+  /**
+   * Header carrying the caller's effective service permissions upstream, comma-separated (only with
+   * forwardPermissionsHeader), e.g. `x-acme-permissions`.
+   */
+  permissionsHeader: string;
+  /** Header the gateway sends upstream on `'upstream'`-metered calls whose limit is spent, e.g. `x-acme-quota-exhausted`. */
+  quotaExhaustedHeader: string;
+  /** Header the upstream answers with on `'upstream'`-metered calls: units to charge, e.g. `x-acme-billable-units`. */
+  billableUnitsHeader: string;
 }
 
 /** Derives every name from the two prefixes. Pure. */
@@ -50,11 +61,15 @@ export function resolveNaming(input: GatewayNamingInput): GatewayNaming {
     tenantClaim: `${c}_tenant`,
     tenantIdClaim: `${c}_tenant_id`,
     tenantIdAttribute: `${c}_tenant_id`,
+    entitlementsAttribute: `${c}_entitlements`,
     clientTenantAttribute: `${c}.tenant`,
     tenantMapperName: `${c}-tenant`,
     tenantIdMapperName: `${c}-tenant-id`,
     tenantHeader: `x-${h}-tenant-id`,
     principalHeader: `x-${h}-principal`,
+    permissionsHeader: `x-${h}-permissions`,
+    quotaExhaustedHeader: `x-${h}-quota-exhausted`,
+    billableUnitsHeader: `x-${h}-billable-units`,
   };
 }
 
@@ -74,6 +89,12 @@ export interface GatewayModuleOptions {
   naming: GatewayNamingInput;
   /** Send `x-<prefix>-principal: TYPE:key` upstream with every proxied call. Default false. */
   forwardPrincipalHeader?: boolean;
+  /**
+   * Send `x-<prefix>-permissions` upstream with every tenant-scoped proxied call: the caller's service permissions
+   * in that tenant after entitlements and per-user narrowing, comma-separated. For an upstream that decides finer
+   * than one permission per route (e.g. which data sources a call may use). Default false.
+   */
+  forwardPermissionsHeader?: boolean;
   /** Defaults for settings not in the environment (ports, Keycloak ids, database). The environment always wins. */
   defaults?: GatewayDefaults;
   /** Extra principal types that appear in old usage rows (e.g. `LEGACY`), listed by the usage API. */
@@ -92,6 +113,7 @@ export interface GatewayModuleOptions {
 export interface ResolvedGatewayOptions extends Omit<GatewayModuleOptions, 'naming'> {
   naming: GatewayNaming;
   forwardPrincipalHeader: boolean;
+  forwardPermissionsHeader: boolean;
   defaults: GatewayDefaults;
   extraPrincipalTypes: string[];
   entities: Function[];
@@ -125,6 +147,7 @@ export function configureGateway(options: GatewayModuleOptions): ResolvedGateway
     ...options,
     naming: resolveNaming(options.naming),
     forwardPrincipalHeader: options.forwardPrincipalHeader ?? false,
+    forwardPermissionsHeader: options.forwardPermissionsHeader ?? false,
     defaults: options.defaults ?? {},
     extraPrincipalTypes: options.extraPrincipalTypes ?? [],
     entities: options.entities ?? [],

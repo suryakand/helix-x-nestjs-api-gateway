@@ -16,8 +16,16 @@ if c == 1 then redis.call('EXPIREAT', KEYS[1], ARGV[2]) end
 return {1, c}
 `;
 
+/** Fixed-window charge after the fact (`'upstream'` routes): adds the units with no cap; returns the new count. */
+const CHARGE_LUA = `
+local c = redis.call('INCRBY', KEYS[1], ARGV[1])
+if c == tonumber(ARGV[1]) then redis.call('EXPIREAT', KEYS[1], ARGV[2]) end
+return c
+`;
+
 export type GatewayRedis = Redis & {
   windowConsume(key: string, limit: number, expireAtSec: number): Promise<[number, number]>;
+  windowCharge(key: string, units: number, expireAtSec: number): Promise<number>;
 };
 
 @Injectable()
@@ -45,6 +53,7 @@ class RedisCloser implements OnApplicationShutdown {
         });
         redis.on('error', (e) => log.warn(`redis: ${e.message}`));
         redis.defineCommand('windowConsume', { numberOfKeys: 1, lua: CONSUME_LUA });
+        redis.defineCommand('windowCharge', { numberOfKeys: 1, lua: CHARGE_LUA });
         return redis as GatewayRedis;
       },
     },

@@ -19,6 +19,8 @@ export interface UsageRecord {
   responseStatus: number;
   durationMs: number;
   clientIp: string | null;
+  /** Units charged for the call (1 on a charged 'request' route, the upstream's count on an 'upstream' one, else 0). */
+  billedUnits: number;
 }
 
 /**
@@ -84,10 +86,11 @@ export class UsageRecorder implements OnModuleInit, OnApplicationShutdown {
       const k = `${day}|${r.tenantId}|${r.principalType}|${r.principalKey}|${r.endpoint}`;
       const d = daily.get(k) ?? Object.assign(new UsageDaily(), {
         day, tenantId: r.tenantId, principalType: r.principalType, principalKey: r.principalKey, principalLabel: r.principalLabel,
-        endpoint: r.endpoint, requestCount: 0, errorCount: 0,
+        endpoint: r.endpoint, requestCount: 0, errorCount: 0, billedCount: 0,
       });
       d.requestCount++;
       if (r.responseStatus >= 400) d.errorCount++;
+      d.billedCount += r.billedUnits;
       daily.set(k, d);
     }
     await this.db.transaction(async (em) => {
@@ -102,7 +105,8 @@ export class UsageRecorder implements OnModuleInit, OnApplicationShutdown {
             `("day", "tenant_id", "endpoint", "principal_type", "principal_key") DO UPDATE SET
                "principal_label" = COALESCE(EXCLUDED.principal_label, usage_daily.principal_label),
                "request_count" = usage_daily.request_count + EXCLUDED.request_count,
-               "error_count" = usage_daily.error_count + EXCLUDED.error_count`,
+               "error_count" = usage_daily.error_count + EXCLUDED.error_count,
+               "billed_count" = usage_daily.billed_count + EXCLUDED.billed_count`,
           )
           .updateEntity(false)
           .execute();

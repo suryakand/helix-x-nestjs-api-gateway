@@ -1,6 +1,6 @@
 {
   "name": "@helix-x/nestjs-api-gateway",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Multi-tenant access gateway for NestJS: Keycloak organizations as tenants, user and M2M client tokens, a table-driven route policy, per-principal quotas, usage metering, a Keycloak admin API and a streaming reverse proxy.",
   "license": "ISC",
   "engines": {

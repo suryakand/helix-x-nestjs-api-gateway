@@ -19,6 +19,10 @@ describe('naming', () => {
       tenantIdMapperName: 'acme-tenant-id',
       tenantHeader: 'x-acme-tenant-id',
       principalHeader: 'x-acme-principal',
+      permissionsHeader: 'x-acme-permissions',
+      quotaExhaustedHeader: 'x-acme-quota-exhausted',
+      billableUnitsHeader: 'x-acme-billable-units',
+      entitlementsAttribute: 'acme_entitlements',
     });
     expect(resolveNaming({ serviceName: 's', claimPrefix: 'ef', headerPrefix: 'gw' }).tenantHeader).toBe('x-gw-tenant-id');
     expect(() => resolveNaming({ serviceName: 's', claimPrefix: 'Bad-Prefix' })).toThrow(/prefixes/);
@@ -33,7 +37,7 @@ describe('configureGateway', () => {
   }));
 
   it('records the options', () => {
-    expect(gatewayOptions()).toMatchObject({ forwardPrincipalHeader: false, entities: [], naming: { tenantHeader: 'x-acme-tenant-id' } });
+    expect(gatewayOptions()).toMatchObject({ forwardPrincipalHeader: false, forwardPermissionsHeader: false, entities: [], naming: { tenantHeader: 'x-acme-tenant-id' } });
     expect(PRINCIPAL_TYPE_VALUES).toEqual(['USER', 'CLIENT', 'ADMIN', 'LEGACY']);
   });
 

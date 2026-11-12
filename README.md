@@ -8,7 +8,9 @@ A multi-tenant access gateway for NestJS, placed in front of one upstream servic
   listed returns 404. Permissions are client roles of one Keycloak resource-server client, granted through
   organization groups (`admins` / `members` / `viewers` → bundle roles).
 - **Per-principal quotas and metering.** Each user and each client in a tenant has a rate limit (daily, weekly,
-  monthly, fixed or unlimited). Every call is logged and rolled up per day.
+  monthly, fixed or unlimited). Each route says what counts against it: every call, nothing, or what the upstream
+  reports a call cost (so only the calls that really cost money are billed). Every call is logged and rolled up
+  per day, with its billed units.
 - **An admin API over Keycloak.** It covers tenants, users, groups, M2M clients and secret rotation. Narrowing an
   admin's own access is refused, every change is audited, and tokens issued before a revocation stop working at once.
 - **A streaming reverse proxy.** Request bodies go upstream untouched, and the gateway sets the tenant header the
@@ -25,8 +27,8 @@ Until it is published, consumers install a packed tarball committed to their `ve
 # in this repo
 npm run pack:local                       # → dist/helix-x-nestjs-api-gateway-<version>.tgz
 # in the consuming gateway
-cp ../../helix-x-nestjs-api-gateway/dist/helix-x-nestjs-api-gateway-0.1.0.tgz vendor/
-npm install ./vendor/helix-x-nestjs-api-gateway-0.1.0.tgz
+cp ../../helix-x-nestjs-api-gateway/dist/helix-x-nestjs-api-gateway-0.2.0.tgz vendor/
+npm install ./vendor/helix-x-nestjs-api-gateway-0.2.0.tgz
 ```
 
 Nest, TypeORM, class-validator, express and rxjs are **peer dependencies**, so there is one copy of Nest's metadata
@@ -85,6 +87,7 @@ fails at boot.
 | `policy` | The route table, from `defineAccessPolicy`. |
 | `naming` | `serviceName`, `claimPrefix` and an optional `headerPrefix` (see below). |
 | `forwardPrincipalHeader` | Also send `x-<prefix>-principal: USER:<sub>` / `CLIENT:<clientId>` upstream. Default false. |
+| `forwardPermissionsHeader` | Also send `x-<prefix>-permissions`: the caller's effective service permissions in the tenant, comma-separated, for an upstream that decides finer than one permission per route. Default false. |
 | `defaults` | Defaults for ports, Keycloak ids, database and Redis. **The environment always wins.** |
 | `extraPrincipalTypes` | Extra principal types listed by the usage API, e.g. `LEGACY` for old rows. |
 | `entities` | Extra TypeORM entities, e.g. tables read only by the product's own scripts. |
@@ -107,8 +110,13 @@ Every product-specific name comes from the two prefixes. They are lower-case let
 | Protocol mapper names on M2M clients | `acme-tenant`, `acme-tenant-id` |
 | Header carrying the tenant upstream | `x-acme-tenant-id` (`headerPrefix`) |
 | Principal header (with `forwardPrincipalHeader`) | `x-acme-principal` |
+| Permissions header (with `forwardPermissionsHeader`) | `x-acme-permissions` |
+| Sent upstream when an `'upstream'`-metered call's limit is spent | `x-acme-quota-exhausted` |
+| Answered by the upstream: units to charge for an `'upstream'`-metered call | `x-acme-billable-units` |
+| Organization attribute with the tenant's entitlements | `acme_entitlements` |
 
-The proxy strips client-sent copies of both headers, so only the gateway can set them. Use the same prefix as
+The proxy strips client-sent copies of these headers, so only the gateway can set them, and never passes the
+billable-units header on to the client. Use the same prefix as
 the realm generator (`@helix-x/kc-realm-generator`, `claimPrefix` in its answers).
 
 ### Environment
@@ -133,7 +141,7 @@ The guard's whole decision is the pure `decideAccess`. It runs these steps in or
 2. resolve the route (404 if unmapped);
 3. verify the token against the realm's JWKS;
 4. read the caller from the token;
-5. resolve the tenant;
+5. resolve the tenant, and narrow the caller's permissions there (see below);
 6. check revocations;
 7. check the permission;
 8. check the quota.
@@ -147,6 +155,69 @@ A route's scope changes the tenant and quota steps:
 
 Platform admins holding `platform:tenants:access` may act in any tenant. Those calls are logged but not metered.
 
+### Metering modes
+
+A tenant route's `metering` says how it counts against the caller's limit. Routes without one use the policy's
+`defaultMetering`, which is `'request'` unless set.
+
+| Mode | Charged | When the limit is spent |
+|---|---|---|
+| `'request'` | 1 per allowed call, by the guard, before proxying | 429 from the gateway |
+| `'upstream'` | What the upstream answers in `x-<prefix>-billable-units` (missing = 0), by the proxy, after the response | Forwarded with `x-<prefix>-quota-exhausted: 1`; the upstream answers what costs it nothing and returns 429 for the rest (the gateway adds `Retry-After`) |
+| `'none'` | Never | Never refused for quota |
+
+`'upstream'` is for routes whose cost is a paid call the upstream may or may not make, such as a third-party
+lookup it can answer from cache. The gateway only looks at the limit before proxying; the charge comes after and is
+never refused, so concurrent calls can take usage slightly over the limit. A call the gateway fails itself (timeout,
+upstream unreachable) is not charged. The `X-RateLimit-*` headers on the response reflect the limit after the charge.
+
+A product that bills only some routes sets `defaultMetering: 'none'` and marks those routes, so a route added later
+is free until someone classifies it:
+
+```ts
+defineAccessPolicy({
+  servicePermissions: ['orders:read'],
+  defaultMetering: 'none',
+  routes: [
+    { method: 'GET', pattern: '/orders/:id', permission: 'orders:read' },
+    { method: 'GET', pattern: '/orders/:id/quote', permission: 'orders:read', metering: 'upstream' },
+  ],
+  upstreamPrefixes: ['/orders'],
+});
+```
+
+Usage records carry the billed units (`usage_logs.billed_units`, `usage_daily.billed_count`, migration `003`), and the
+users and clients admin lists show them as `usage30d.billed` beside the call count.
+
+The usage API (`tenant:usage:read`, under `/tenants/:tid/usage`) serves the tenant's usage screens:
+
+| Route | Returns |
+|---|---|
+| `top-principals?days&limit&offset&principalType&sort` | Callers with calls, errors and billed units; paged, sorted by `requests`, `billed` or `errors` |
+| `daily?days&principalType&principalKey` | Calls, errors and billed units per day |
+| `calls?days&limit&offset&…filters` | One page of calls, newest first, and `total` for the pager. Filters (comma-separated lists match any value): `principalType`, `principalKey`, `endpoint`, `method`, `status` (`ok`, `error`, `client`, `limited`, `server`), `billed` (`true`/`false`), `q` (text in the path) |
+| `endpoints?days` | Route templates called in the period, for an endpoint filter |
+| `recent?limit` | The latest calls, unpaged (kept for older screens; `calls` supersedes it) |
+
+### Entitlements and per-user narrowing
+
+The token says what Keycloak granted. The gateway can only take service permissions away from that, never add
+any, in two ways (`effectivePermissions`, applied by `restrictGrant`):
+
+- **Tenant entitlements.** The organization attribute `<prefix>_entitlements` lists the service permissions the
+  tenant may use. A platform admin sets it with `PATCH /tenants/:tid { "entitlements": [...] }` (`[]` = none).
+  Without the attribute the policy's `defaultEntitlements` apply. They default to every service permission, so
+  a product that doesn't use entitlements behaves as before. List fewer to make a product opt-in.
+- **Per-user narrowing.** A tenant admin can allow a user only some of their group's service permissions:
+  `allowedPermissions` on invite and on `PATCH /tenants/:tid/users/:id` (`null` = not narrowed). It is stored
+  on the user's `principal_limits` row, applies only to members, and never to M2M clients, whose permissions are
+  already chosen one by one.
+
+Both apply on the next call, on every instance (the caches are invalidated through Redis). The admin API uses the
+same narrowed grant, so an admin can grant clients, or allow users, only what the tenant is entitled to.
+`GET /permissions` lists the policy's `products` (service permissions grouped by product, for admin screens) and
+`defaultEntitlements`.
+
 Gateway-owned permissions, the same in every product:
 
 - tenant admin: `tenant:usage:read`, `tenant:users:read|manage`, `tenant:clients:read|manage`;
@@ -154,7 +225,7 @@ Gateway-owned permissions, the same in every product:
 
 ## Schema migrations
 
-The gateway's tables are `principal_limits`, `usage_logs`, `usage_daily` and `admin_audit`. They are created by
+The gateway's tables are `principal_limits` (limits and per-user narrowing), `usage_logs`, `usage_daily` and `admin_audit`. They are created by
 this package's `migrations/` (postgres, plus `sqlite/` twins), which record themselves in their **own ledger**,
 `gateway_schema_migrations`. A product's migrations (`options.migrations.dir`) keep their own ledger,
 `schema_migrations` by default. The two sets never share version numbers.

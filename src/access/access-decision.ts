@@ -9,13 +9,55 @@ import { AccessContext } from './request-context';
  * extract → verify token → caller → tenant → revocation → permission → quota.
  *
  * Every permission comes from the token (Keycloak is the only source of authorization data). The gateway
- * adds only two things Keycloak can't: revocations made through its admin API since the token was issued
- * (Redis), and usage limits (its database).
+ * narrows it (never widens it) by the tenant's entitlements (an organization attribute) and, for a user, by the
+ * permissions an admin allowed them (its database), and adds revocations made through its admin API since the
+ * token was issued (Redis) and usage limits (its database).
  */
 export type RouteMode = 'proxy' | 'jwt-only' | 'any';
 
 /** What the gateway can find out about an organization (cached Keycloak lookup). */
-export interface OrgInfo { orgId: string; tenantId: string; alias: string; name: string; enabled: boolean }
+export interface OrgInfo {
+  orgId: string;
+  tenantId: string;
+  alias: string;
+  name: string;
+  enabled: boolean;
+  /**
+   * Service permissions the tenant may use, from its `<prefix>_entitlements` attribute; null when it has none
+   * (then the policy's `defaultEntitlements` apply).
+   */
+  entitlements: string[] | null;
+}
+
+/** Attribute value meaning "no service permissions at all" (an attribute can't hold an empty list). */
+export const NO_ENTITLEMENTS = '-';
+
+/** An entitlements attribute's values as permissions; undefined (no attribute) → null. */
+export function parseEntitlements(values: readonly string[] | undefined): string[] | null {
+  return values ? values.filter((v) => v && v !== NO_ENTITLEMENTS) : null;
+}
+
+/** The attribute values that store `permissions` (see {@link parseEntitlements}). */
+export function entitlementValues(permissions: readonly string[]): string[] {
+  return permissions.length ? [...new Set(permissions)] : [NO_ENTITLEMENTS];
+}
+
+/**
+ * A caller's permissions in a tenant after the gateway's narrowing. Only service permissions are narrowed:
+ * one is kept when the tenant is entitled to it (`entitlements`, or the policy's defaults when null) and, when
+ * `allowed` is given (an admin's per-user choice), when it is in `allowed` too. Tenant admin, platform and
+ * bundle roles pass through unchanged. Pure.
+ */
+export function effectivePermissions(
+  permissions: readonly string[],
+  policy: Pick<AccessPolicy, 'isServicePermission' | 'defaultEntitlements'>,
+  entitlements: readonly string[] | null,
+  allowed: readonly string[] | null,
+): string[] {
+  const entitled = new Set(entitlements ?? policy.defaultEntitlements);
+  const permitted = allowed ? new Set(allowed) : null;
+  return permissions.filter((p) => !policy.isServicePermission(p) || (entitled.has(p) && (!permitted || permitted.has(p))));
+}
 
 /** The decision's inputs besides the request: the product's policy and naming, and every I/O as a function. */
 export interface AccessPorts extends CallerContext {
@@ -25,7 +67,11 @@ export interface AccessPorts extends CallerContext {
   revokedBefore(keys: string[]): Promise<number | undefined>;
   orgById(orgId: string): Promise<OrgInfo | null>;
   orgByTenantId(tenantId: string): Promise<OrgInfo | null>;
+  /** The service permissions an admin allowed this user in this tenant; null = no narrowing. */
+  allowedPermissions(tenantId: string, caller: Caller): Promise<string[] | null>;
   consume(tenantId: string, caller: Caller): Promise<ConsumeResult>;
+  /** The caller's limit without charging it (`'upstream'` routes); `allowed` false = already spent. */
+  peek(tenantId: string, caller: Caller): Promise<ConsumeResult>;
 }
 
 export interface AccessInput {
@@ -97,6 +143,21 @@ export async function resolveTenant(
     : { ok: false, status: 403, message: 'not a member of any tenant' };
 }
 
+/**
+ * A grant from {@link resolveTenant} with the gateway's narrowing applied ({@link effectivePermissions}): the
+ * tenant's entitlements for everyone, and an admin's per-user choice for a member user. A platform admin acting
+ * outside their own tenants keeps their global permissions, limited only by the tenant's entitlements.
+ */
+export async function restrictGrant(
+  caller: Caller, grant: TenantGrant, ports: Pick<AccessPorts, 'policy' | 'orgById' | 'allowedPermissions'>,
+): Promise<TenantGrant> {
+  const [org, allowed] = await Promise.all([
+    ports.orgById(grant.orgId).catch(() => null),
+    caller.type === 'USER' && grant.member ? ports.allowedPermissions(grant.tenantId, caller) : Promise.resolve(null),
+  ]);
+  return { ...grant, permissions: effectivePermissions(grant.permissions, ports.policy, org?.entitlements ?? null, allowed) };
+}
+
 export async function decideAccess(input: AccessInput, ports: AccessPorts): Promise<AccessOutcome> {
   // 1. Extraction
   const bearer = /^Bearer\s+(.+)$/i.exec(input.authorization ?? '')?.[1]?.trim();
@@ -146,7 +207,7 @@ export async function decideAccess(input: AccessInput, ports: AccessPorts): Prom
   const header = input.tenantHeader?.trim() || undefined;
   const t = await resolveTenant(caller, caller.type === 'CLIENT' ? undefined : header, ports);
   if (!t.ok) return deny(t.status, t.message);
-  const { grant } = t;
+  const grant = await restrictGrant(caller, t.grant, ports);
   const access: AccessContext = {
     authType, caller, tenant: { id: grant.tenantId, orgId: grant.orgId, alias: grant.alias }, member: grant.member,
     permissions: grant.permissions, endpoint,
@@ -160,10 +221,18 @@ export async function decideAccess(input: AccessInput, ports: AccessPorts): Prom
     return deny(403, `missing permission ${needed} in tenant ${grant.alias || grant.tenantId}`, { identified: access });
   }
 
-  // 7. Quota: members and clients are metered; a platform admin outside their tenants is only logged.
-  if (!grant.member) return { ok: true, access };
+  // 7. Quota: members and clients are metered as the route says; a platform admin outside their tenants is only logged.
+  const mode = grant.member && rule ? ports.policy.meteringOf(rule) : 'none';
+  if (mode === 'none') return { ok: true, access: { ...access, metering: { mode } } };
+  if (mode === 'upstream') {
+    // Not charged here: the upstream reports what the call cost, and the proxy charges it afterwards. A spent
+    // limit is passed on rather than refused, so the upstream can still answer what costs it nothing.
+    const state = await ports.peek(grant.tenantId, caller);
+    if (state.degraded && !state.allowed) return deny(503, 'rate limiter unavailable, try again shortly', { identified: access });
+    return { ok: true, access: { ...access, metering: { mode, exhausted: !state.allowed, state } } };
+  }
   const quota = await ports.consume(grant.tenantId, caller);
-  if (quota.allowed) return { ok: true, access, quota };
+  if (quota.allowed) return { ok: true, access: { ...access, metering: { mode } }, quota };
   const who = caller.type === 'CLIENT' ? 'client' : 'user';
   return quota.degraded
     ? deny(503, 'rate limiter unavailable, try again shortly', { quota, identified: access })

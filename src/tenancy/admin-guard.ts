@@ -19,6 +19,17 @@ export function checkClientPermissions(actor: string[], requested: string[], isS
   return missing.length ? `you cannot grant permissions you don't hold: ${missing.join(', ')}` : null;
 }
 
+/**
+ * A user's narrowing (the service permissions an admin allows them) may list only service permissions the admin
+ * holds here, which are already limited by the tenant's entitlements. Same confused-deputy rule as clients.
+ */
+export function checkUserPermissions(actor: string[], requested: string[], isServicePermission: (p: string) => boolean): string | null {
+  const notService = requested.filter((p) => !isServicePermission(p));
+  if (notService.length) return `a user can only be narrowed to service permissions, not ${notService.join(', ')}`;
+  const missing = requested.filter((p) => !actor.includes(p));
+  return missing.length ? `you cannot allow permissions you don't hold: ${missing.join(', ')}` : null;
+}
+
 /** A tenant must keep at least one admin, or nobody but a platform admin could manage it. */
 export function checkKeepsAdmin(adminsNow: string[], target: string, targetStaysAdmin: boolean): string | null {
   if (targetStaysAdmin || !adminsNow.includes(target)) return null;

@@ -3,8 +3,8 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { sqlTimestamp } from '../database/column-types';
 
-export interface UsageTotals { requests: number; errors: number }
-export const NO_USAGE: UsageTotals = { requests: 0, errors: 0 };
+export interface UsageTotals { requests: number; errors: number; billed: number }
+export const NO_USAGE: UsageTotals = { requests: 0, errors: 0, billed: 0 };
 
 export const clampDays = (d: number) => Math.min(Math.max(d, 1), 366);
 /** First day (UTC, YYYY-MM-DD) of a `days`-long window ending today. */
@@ -17,16 +17,17 @@ export class UsageStatsService {
 
   /** From the usage_daily rollup. */
   async totals(tenantId: string, type: 'USER' | 'CLIENT', days = 30): Promise<Map<string, UsageTotals>> {
-    const rows: { principal_key: string; requests: string; errors: string }[] = await this.db
+    const rows: { principal_key: string; requests: string; errors: string; billed: string }[] = await this.db
       .createQueryBuilder()
       .select('principal_key')
       .addSelect('SUM(request_count)', 'requests')
       .addSelect('SUM(error_count)', 'errors')
+      .addSelect('SUM(billed_count)', 'billed')
       .from('usage_daily', 'd')
       .where('tenant_id = :tenantId AND principal_type = :type AND day >= :since', { tenantId, type, since: since(clampDays(days)) })
       .groupBy('principal_key')
       .getRawMany();
-    return new Map(rows.map((r) => [r.principal_key, { requests: Number(r.requests), errors: Number(r.errors) }]));
+    return new Map(rows.map((r) => [r.principal_key, { requests: Number(r.requests), errors: Number(r.errors), billed: Number(r.billed) }]));
   }
 
   /** Last call per principal (index idx_usage_logs_principal). */

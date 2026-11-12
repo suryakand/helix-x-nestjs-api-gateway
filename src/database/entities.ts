@@ -36,6 +36,11 @@ export class PrincipalLimit {
   @Column({ name: 'rate_limit_value', type: 'int', nullable: true }) rateLimitValue: number | null;
   /** Consumed part of a FIXED quota. Windowed (DAILY/WEEKLY/MONTHLY) counters live in Redis. */
   @Column({ name: 'fixed_used', type: 'int', default: 0 }) fixedUsed: number;
+  /**
+   * USER only: the service permissions an admin allowed this user here. The group's bundle still sets the
+   * maximum; null = no narrowing.
+   */
+  @Column({ name: 'allowed_permissions', ...COL.nullableTextArray }) allowedPermissions: string[] | null;
   @UpdateDateColumn({ name: 'updated_at', ...COL.timestamptz }) updatedAt: Date;
 }
 
@@ -77,6 +82,8 @@ export class UsageLog {
   @Column({ type: 'varchar', length: 500 }) path: string;
   @Column({ name: 'response_status', type: 'smallint' }) responseStatus: number;
   @Column({ name: 'duration_ms', type: 'int' }) durationMs: number;
+  /** Units charged to the caller's limit for this call (see MeteringMode); 0 when nothing was billed. */
+  @Column({ name: 'billed_units', type: 'int', default: 0 }) billedUnits: number;
   @Column({ name: 'client_ip', ...COL.inet, nullable: true }) clientIp: string | null;
 }
 
@@ -95,6 +102,7 @@ export class UsageDaily {
   @Column({ name: 'principal_label', type: 'varchar', length: 255, nullable: true }) principalLabel: string | null;
   @Column({ name: 'request_count', type: 'int', default: 0 }) requestCount: number;
   @Column({ name: 'error_count', type: 'int', default: 0 }) errorCount: number;
+  @Column({ name: 'billed_count', type: 'int', default: 0 }) billedCount: number;
 }
 
 export const ENTITIES = [

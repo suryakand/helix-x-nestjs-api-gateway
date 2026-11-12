@@ -40,7 +40,9 @@ describe('schema-migrate', () => {
     const dir = join(__dirname, '..', 'migrations');
     for (const driver of ['postgres', 'sqlite'] as const) {
       const files = listMigrations(dir, driver);
-      expect(files.map((f) => f.version)).toEqual(['000_create_gateway_schema_migrations', '001_gateway_core_schema']);
+      expect(files.map((f) => f.version)).toEqual([
+        '000_create_gateway_schema_migrations', '001_gateway_core_schema', '002_principal_allowed_permissions', '003_usage_billed_units',
+      ]);
       for (const f of files) {
         expect(f.sql).toContain(`INSERT INTO ${GATEWAY_LEDGER_TABLE} (version, checksum, applied_by)\nVALUES ('${f.version}', '${SELF_RECORDED}'`);
         // The runner owns the transaction (a DO block's BEGIN has no ';').
